@@ -73,6 +73,11 @@ TIER2_PATTERNS = [
     # Intentionally stalling at low altitude
     r'\bstall(?:ing|ed)\s+the\s+(?:glider|wing)\s+(?:from|at)\s+\d+',
     r'\bpilot\s+stalled\s+(?:the\s+)?wing\s+while',
+    # Low altitude / low flying / flyby
+    r'\blow\s+altitude\b',
+    r'\blow\s+flying\b',
+    r'\blow\s+pass\b',
+    r'\bfly\s*by\b',
 ]
 
 # ============================================================================
