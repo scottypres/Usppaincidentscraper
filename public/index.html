@@ -253,36 +253,51 @@ function renderFiles(manifest) {
   el.innerHTML = html;
 }
 
-// Poll status.json for live progress
+// Fetch from GitHub raw content (updates instantly on push, no Vercel redeploy needed)
+const RAW_BASE = 'https://raw.githubusercontent.com/' + REPO + '/main/public/data/';
+
 let statusInterval;
 function pollStatus() {
-  fetch('data/status.json?t=' + Date.now())
+  fetch(RAW_BASE + 'status.json?t=' + Date.now())
     .then(r => r.json())
     .then(status => {
       updateStatus(status);
-      // Stop polling if complete
       if (status.phase === 'complete' && statusInterval) {
         clearInterval(statusInterval);
         statusInterval = null;
+        // Reload file list from GitHub too
+        fetch(RAW_BASE + 'manifest.json?t=' + Date.now())
+          .then(r => r.json())
+          .then(renderFiles)
+          .catch(() => {});
       }
     })
     .catch(() => {
-      // No status file yet, hide the card
+      // No status file yet
     });
 }
 
-// Load files
+// Load file list - try local first (Vercel deploy), fall back to GitHub raw
 fetch('data/manifest.json?t=' + Date.now())
   .then(r => r.json())
-  .then(renderFiles)
+  .then(manifest => {
+    if (manifest.files && manifest.files.length > 0) {
+      renderFiles(manifest);
+    } else {
+      // Local manifest empty, try GitHub raw
+      return fetch(RAW_BASE + 'manifest.json?t=' + Date.now())
+        .then(r => r.json())
+        .then(renderFiles);
+    }
+  })
   .catch(() => {
     document.getElementById('content').innerHTML =
       '<div class="empty">No data files found. Trigger the scraper from the GitHub Actions tab to get started.</div>';
   });
 
-// Start polling status
+// Poll status from GitHub raw (every 5s for faster updates)
 pollStatus();
-statusInterval = setInterval(pollStatus, 10000); // every 10s
+statusInterval = setInterval(pollStatus, 5000);
 </script>
 </body>
 </html>

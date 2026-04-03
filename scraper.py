@@ -179,17 +179,29 @@ def save_manifest(batch_count):
         json.dump(manifest, mf, indent=2)
 
 
+_git_configured = False
+
 def git_push_status():
     """Commit and push status.json so the website updates mid-scrape."""
+    global _git_configured
     import subprocess
     try:
-        subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True, capture_output=True)
-        subprocess.run(['git', 'config', 'user.email', 'github-actions[bot]@users.noreply.github.com'], check=True, capture_output=True)
-        subprocess.run(['git', 'add', '-f', os.path.join(OUTPUT_DIR, 'status.json')], check=True, capture_output=True)
-        subprocess.run(['git', 'commit', '-m', 'Update scraper status [automated]'], check=True, capture_output=True)
-        subprocess.run(['git', 'push'], check=True, capture_output=True)
-    except Exception:
-        pass  # Non-critical, don't break the scrape
+        if not _git_configured:
+            subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], capture_output=True)
+            subprocess.run(['git', 'config', 'user.email', 'github-actions[bot]@users.noreply.github.com'], capture_output=True)
+            _git_configured = True
+        status_path = os.path.join(OUTPUT_DIR, 'status.json')
+        subprocess.run(['git', 'add', '-f', status_path], check=True, capture_output=True)
+        result = subprocess.run(['git', 'diff', '--staged', '--quiet'], capture_output=True)
+        if result.returncode != 0:  # there are staged changes
+            subprocess.run(['git', 'commit', '-m', 'Update scraper status [automated]', '--allow-empty'],
+                           check=True, capture_output=True)
+            # Pull with rebase to avoid merge conflicts from prior pushes
+            subprocess.run(['git', 'pull', '--rebase', '--autostash'], capture_output=True)
+            subprocess.run(['git', 'push'], check=True, capture_output=True)
+            print(f'\n  [status pushed to GitHub]', file=sys.stderr)
+    except Exception as e:
+        print(f'\n  [status push failed: {e}]', file=sys.stderr)
 
 
 def main():
