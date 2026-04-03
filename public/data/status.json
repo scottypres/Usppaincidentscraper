@@ -1,9 +1,9 @@
 {
-  "phase": "listing",
+  "phase": "scraping",
   "done": 0,
-  "total": 0,
-  "message": "Discovering incident pages...",
-  "timestamp": "2026-04-03T08:54:17Z",
+  "total": 542,
+  "message": "Scraping 542 incidents...",
+  "timestamp": "2026-04-03T08:54:26Z",
   "started_at": "2026-04-03T08:54:17Z",
-  "elapsed_seconds": 0
+  "elapsed_seconds": 9
 }
