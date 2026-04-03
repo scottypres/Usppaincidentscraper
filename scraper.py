@@ -217,10 +217,16 @@ def save_manifest(batch_count):
             continue
         filepath = os.path.join(OUTPUT_DIR, f)
         if os.path.isfile(filepath):
+            if f.startswith('acro_'):
+                ftype = 'acro'
+            elif f.startswith('usppa_incidents_all'):
+                ftype = 'combined'
+            else:
+                ftype = 'batch'
             files.append({
                 'name': f,
                 'size': os.path.getsize(filepath),
-                'type': 'combined' if f.startswith('usppa_incidents_all') else 'batch',
+                'type': ftype,
             })
     manifest = {'files': files, 'batch_count': batch_count}
     with open(os.path.join(OUTPUT_DIR, 'manifest.json'), 'w') as mf:
@@ -304,6 +310,17 @@ def run_scrape():
                 elapsed_seconds=elapsed, started_at=started_at)
 
     print(f'\n\nDone! {len(all_records)} records in {batch_num} batches. ({elapsed}s)', file=sys.stderr)
+
+    # Run acro filter
+    print('\nFiltering acro incidents...', file=sys.stderr)
+    try:
+        from acro_filter import main as run_acro_filter
+        run_acro_filter()
+    except Exception as e:
+        print(f'Acro filter error: {e}', file=sys.stderr)
+
+    # Rebuild manifest to include acro CSV
+    save_manifest(batch_num)
 
     # Auto-push to repo
     git_push_data()

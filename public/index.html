@@ -66,6 +66,8 @@
     display: inline-block; padding: 6px 18px; color: white;
     text-decoration: none; border-radius: 4px; font-size: 0.85rem; font-weight: 500;
   }
+  .btn-acro { background: #e74c3c; }
+  .btn-acro:hover { background: #c0392b; }
   .btn-combined { background: #27ae60; }
   .btn-combined:hover { background: #219a52; }
   .btn-batch { background: #3498db; }
@@ -191,9 +193,17 @@ function renderFiles(manifest) {
     el.innerHTML = '<div class="empty">No data files yet.</div>';
     return;
   }
+  const acro = manifest.files.filter(f => f.type === 'acro');
   const combined = manifest.files.filter(f => f.type === 'combined');
   const batches = manifest.files.filter(f => f.type === 'batch');
   let html = '';
+  if (acro.length) {
+    html += '<div class="section-label">Acro Incidents (Google Form Format)</div><table><tr><th>File</th><th>Size</th><th></th></tr>';
+    acro.forEach(f => {
+      html += '<tr><td>'+f.name+'</td><td class="size">'+formatSize(f.size)+'</td><td><a href="data/'+f.name+'" download class="btn btn-acro">Download</a></td></tr>';
+    });
+    html += '</table>';
+  }
   if (combined.length) {
     html += '<div class="section-label">Combined (All Incidents)</div><table><tr><th>File</th><th>Size</th><th></th></tr>';
     combined.forEach(f => {
