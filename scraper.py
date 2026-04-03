@@ -103,12 +103,11 @@ def parse_entry(url):
 def progress_bar(current, total, width=40):
     pct = current / total if total else 0
     filled = int(width * pct)
-    bar = '█' * filled + '░' * (width - filled)
+    bar = '\u2588' * filled + '\u2591' * (width - filled)
     return f'\r  [{bar}] {current}/{total} ({pct:.0%})'
 
 
 def save_batch_csv(records, batch_num):
-    """Save a batch of records to an individual CSV file."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     filename = f'incidents_batch_{batch_num:03d}.csv'
     filepath = os.path.join(OUTPUT_DIR, filename)
@@ -120,9 +119,7 @@ def save_batch_csv(records, batch_num):
 
 
 def save_combined(records):
-    """Save combined CSV and JSON of all records."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
     records.sort(key=lambda r: int(r.get('Entry_ID', '0') or '0'), reverse=True)
 
     csv_path = os.path.join(OUTPUT_DIR, 'usppa_incidents_all.csv')
@@ -138,31 +135,22 @@ def save_combined(records):
     return csv_path, json_path
 
 
-_start_time = None
-
-def save_status(phase, done=0, total=0, message=''):
-    """Write status.json so the website can show live progress."""
-    global _start_time
+def save_status(phase, done=0, total=0, message='', elapsed_seconds=0, started_at=''):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-    if _start_time is None:
-        _start_time = now
-    elapsed = int(time.time() - time.mktime(time.strptime(_start_time, '%Y-%m-%dT%H:%M:%SZ')))
     status = {
         'phase': phase,
         'done': done,
         'total': total,
         'message': message,
-        'timestamp': now,
-        'started_at': _start_time,
-        'elapsed_seconds': elapsed,
+        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'started_at': started_at,
+        'elapsed_seconds': elapsed_seconds,
     }
     with open(os.path.join(OUTPUT_DIR, 'status.json'), 'w') as f:
         json.dump(status, f, indent=2)
 
 
 def save_manifest(batch_count):
-    """Generate a manifest.json listing all downloadable files."""
     files = []
     for f in sorted(os.listdir(OUTPUT_DIR)):
         if f in ('manifest.json', 'status.json'):
@@ -179,50 +167,24 @@ def save_manifest(batch_count):
         json.dump(manifest, mf, indent=2)
 
 
-_git_configured = False
+def run_scrape():
+    """Run the full scrape. Writes status.json throughout for live progress."""
+    start = time.time()
+    started_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
-def git_push_status():
-    """Commit and push status.json so the website updates mid-scrape."""
-    global _git_configured
-    import subprocess
-    try:
-        if not _git_configured:
-            subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], capture_output=True)
-            subprocess.run(['git', 'config', 'user.email', 'github-actions[bot]@users.noreply.github.com'], capture_output=True)
-            _git_configured = True
-        status_path = os.path.join(OUTPUT_DIR, 'status.json')
-        subprocess.run(['git', 'add', '-f', status_path], check=True, capture_output=True)
-        result = subprocess.run(['git', 'diff', '--staged', '--quiet'], capture_output=True)
-        if result.returncode != 0:  # there are staged changes
-            subprocess.run(['git', 'commit', '-m', 'Update scraper status [automated]', '--allow-empty'],
-                           check=True, capture_output=True)
-            # Pull with rebase to avoid merge conflicts from prior pushes
-            subprocess.run(['git', 'pull', '--rebase', '--autostash'], capture_output=True)
-            subprocess.run(['git', 'push'], check=True, capture_output=True)
-            print(f'\n  [status pushed to GitHub]', file=sys.stderr)
-    except Exception as e:
-        print(f'\n  [status push failed: {e}]', file=sys.stderr)
-
-
-def main():
-    print('=== USPPA Incident Scraper ===', file=sys.stderr)
-
-    save_status('listing', message='Discovering incident pages...')
-    git_push_status()
+    save_status('listing', message='Discovering incident pages...', started_at=started_at)
 
     entry_urls = get_entry_urls()
     total = len(entry_urls)
-    print(f'\nFound {total} entries. Scraping with 10 threads…\n', file=sys.stderr)
+    print(f'\nFound {total} entries. Scraping with 10 threads...\n', file=sys.stderr)
 
-    save_status('scraping', done=0, total=total, message=f'Scraping {total} incidents...')
-    git_push_status()
+    save_status('scraping', done=0, total=total,
+                message=f'Scraping {total} incidents...', started_at=started_at)
 
     records = []
     all_records = []
     done = 0
     batch_num = 0
-    last_pct_pushed = -1
-    one_pct = max(1, total // 100)  # how many entries = 1%
 
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(parse_entry, url): url for url in entry_urls}
@@ -233,45 +195,41 @@ def main():
                 records.append(rec)
                 all_records.append(rec)
 
-            # Progress bar
+            # Terminal progress bar
             sys.stderr.write(progress_bar(done, total))
             sys.stderr.flush()
 
-            # Push status every 1%
-            current_pct = (done * 100) // total if total else 0
-            if current_pct > last_pct_pushed:
-                last_pct_pushed = current_pct
-                save_status('scraping', done=done, total=total,
-                            message=f'Scraped {done}/{total} incidents ({current_pct}%)')
-                git_push_status()
+            # Update status.json every entry (instant local reads)
+            elapsed = int(time.time() - start)
+            pct = (done * 100) // total if total else 0
+            save_status('scraping', done=done, total=total,
+                        message=f'Scraped {done}/{total} incidents ({pct}%)',
+                        elapsed_seconds=elapsed, started_at=started_at)
 
-            # Save batch every 100 incidents
+            # Save batch CSV every 100
             if len(records) >= 100:
                 batch_num += 1
                 fname = save_batch_csv(records, batch_num)
-                sys.stderr.write(f'\n  Saved batch {batch_num}: {fname} ({len(records)} records)\n')
+                save_manifest(batch_num)
+                sys.stderr.write(f'\n  Saved batch {batch_num}: {fname}\n')
                 records = []
 
-    # Save remaining records as final batch
+    # Final batch
     if records:
         batch_num += 1
-        fname = save_batch_csv(records, batch_num)
-        sys.stderr.write(f'\n  Saved batch {batch_num}: {fname} ({len(records)} records)\n')
+        save_batch_csv(records, batch_num)
 
-    # Save combined files
-    csv_path, json_path = save_combined(all_records)
-
-    # Generate manifest for the static site
+    # Combined files
+    save_combined(all_records)
     save_manifest(batch_num)
 
+    elapsed = int(time.time() - start)
     save_status('complete', done=len(all_records), total=len(all_records),
-                message=f'Done! {len(all_records)} incidents in {batch_num} batches.')
+                message=f'Done! {len(all_records)} incidents in {batch_num} batches.',
+                elapsed_seconds=elapsed, started_at=started_at)
 
-    print(f'\n\nDone! Scraped {len(all_records)} records in {batch_num} batches.', file=sys.stderr)
-    print(f'Combined CSV: {csv_path}', file=sys.stderr)
-    print(f'Combined JSON: {json_path}', file=sys.stderr)
-    print(f'\nFiles saved to public/data/. Deploy with "vercel" or "python server.py".', file=sys.stderr)
+    print(f'\n\nDone! {len(all_records)} records in {batch_num} batches. ({elapsed}s)', file=sys.stderr)
 
 
 if __name__ == '__main__':
-    main()
+    run_scrape()
