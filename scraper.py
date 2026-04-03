@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 BASE = 'https://usppa.org'
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public', 'data')
 
 COLS = ['Entry_ID','Incident_Date','Incident_DateTime','Location','PPG_Type','Type_of_Incident',
         'Description','Type_of_Injury','Phase_of_Flight','Flight_Window','Wind_Speed',
@@ -138,6 +138,24 @@ def save_combined(records):
     return csv_path, json_path
 
 
+def save_manifest(batch_count):
+    """Generate a manifest.json listing all downloadable files."""
+    files = []
+    for f in sorted(os.listdir(OUTPUT_DIR)):
+        if f == 'manifest.json':
+            continue
+        filepath = os.path.join(OUTPUT_DIR, f)
+        if os.path.isfile(filepath):
+            files.append({
+                'name': f,
+                'size': os.path.getsize(filepath),
+                'type': 'combined' if f.startswith('usppa_incidents_all') else 'batch',
+            })
+    manifest = {'files': files, 'batch_count': batch_count}
+    with open(os.path.join(OUTPUT_DIR, 'manifest.json'), 'w') as mf:
+        json.dump(manifest, mf, indent=2)
+
+
 def main():
     print('=== USPPA Incident Scraper ===', file=sys.stderr)
     entry_urls = get_entry_urls()
@@ -177,10 +195,14 @@ def main():
 
     # Save combined files
     csv_path, json_path = save_combined(all_records)
+
+    # Generate manifest for the static site
+    save_manifest(batch_num)
+
     print(f'\n\nDone! Scraped {len(all_records)} records in {batch_num} batches.', file=sys.stderr)
     print(f'Combined CSV: {csv_path}', file=sys.stderr)
     print(f'Combined JSON: {json_path}', file=sys.stderr)
-    print(f'\nRun "python server.py" to serve files for download.', file=sys.stderr)
+    print(f'\nFiles saved to public/data/. Deploy with "vercel" or "python server.py".', file=sys.stderr)
 
 
 if __name__ == '__main__':

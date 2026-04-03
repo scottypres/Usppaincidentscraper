@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>USPPA Incident Data Downloads</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    max-width: 860px; margin: 0 auto; padding: 40px 20px;
+    background: #f0f2f5; color: #333;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 8px; }
+  .subtitle { color: #666; margin-bottom: 28px; }
+  .section-label {
+    font-weight: 600; font-size: 0.85rem; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #888; margin: 24px 0 10px;
+  }
+  table {
+    width: 100%; border-collapse: collapse; background: white;
+    border-radius: 8px; overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    margin-bottom: 16px;
+  }
+  th {
+    background: #2c3e50; color: white; padding: 12px 16px;
+    text-align: left; font-size: 0.9rem;
+  }
+  td { padding: 10px 16px; border-bottom: 1px solid #f0f0f0; font-size: 0.9rem; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: #f8f9fa; }
+  .btn {
+    display: inline-block; padding: 6px 18px;
+    color: white; text-decoration: none; border-radius: 4px;
+    font-size: 0.85rem; font-weight: 500; transition: background 0.2s;
+  }
+  .btn-combined { background: #27ae60; }
+  .btn-combined:hover { background: #219a52; }
+  .btn-batch { background: #3498db; }
+  .btn-batch:hover { background: #2980b9; }
+  .empty {
+    text-align: center; padding: 40px; color: #999;
+    background: white; border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  .size { color: #888; white-space: nowrap; }
+</style>
+</head>
+<body>
+<h1>USPPA Incident Data</h1>
+<p class="subtitle">Download individual batch files (100 incidents each) or the full combined dataset.</p>
+
+<div id="content"><div class="empty">Loading...</div></div>
+
+<script>
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function renderFiles(manifest) {
+  const el = document.getElementById('content');
+  if (!manifest.files || manifest.files.length === 0) {
+    el.innerHTML = '<div class="empty">No files yet. Run <code>python scraper.py</code> first, then redeploy.</div>';
+    return;
+  }
+
+  const combined = manifest.files.filter(f => f.type === 'combined');
+  const batches = manifest.files.filter(f => f.type === 'batch');
+  let html = '';
+
+  if (combined.length) {
+    html += '<div class="section-label">Combined (All Incidents)</div><table><tr><th>File</th><th>Size</th><th></th></tr>';
+    combined.forEach(f => {
+      html += `<tr><td>${f.name}</td><td class="size">${formatSize(f.size)}</td><td><a href="data/${f.name}" download class="btn btn-combined">Download</a></td></tr>`;
+    });
+    html += '</table>';
+  }
+
+  if (batches.length) {
+    html += `<div class="section-label">Batches (${batches.length} files, ~100 incidents each)</div><table><tr><th>File</th><th>Size</th><th></th></tr>`;
+    batches.forEach(f => {
+      html += `<tr><td>${f.name}</td><td class="size">${formatSize(f.size)}</td><td><a href="data/${f.name}" download class="btn btn-batch">Download</a></td></tr>`;
+    });
+    html += '</table>';
+  }
+
+  el.innerHTML = html;
+}
+
+fetch('data/manifest.json')
+  .then(r => r.json())
+  .then(renderFiles)
+  .catch(() => {
+    document.getElementById('content').innerHTML =
+      '<div class="empty">No data files found. Run <code>python scraper.py</code> to generate data, then deploy.</div>';
+  });
+</script>
+</body>
+</html>
