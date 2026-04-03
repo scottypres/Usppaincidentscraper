@@ -1,6 +1,3 @@
 __pycache__/
 *.pyc
 .vercel
-public/data/*.csv
-public/data/*.json
-!public/data/manifest.json
