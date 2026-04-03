@@ -1,111 +1,127 @@
 """
-Post-scrape filter: extract acro-related incidents from scraped data
+Post-scrape filter: extract acro-related incidents from scraped USPPA data
 and output in Google Forms format with USPPA incident link.
 
-Run after scraper: python acro_filter.py
-Or auto-runs after scraper completes.
+Keywords and patterns derived from reading all 542 actual USPPA incident reports.
 """
 import csv, json, re, os
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(ROOT_DIR, 'public', 'data')
-# Check both locations for the JSON
 INPUT_JSON_DATA = os.path.join(DATA_DIR, 'usppa_incidents_all.json')
 INPUT_JSON_ROOT = os.path.join(ROOT_DIR, 'usppa_incidents_all.json')
 OUTPUT_CSV = os.path.join(DATA_DIR, 'acro_incidents.csv')
 
-# --- Acro keywords found in actual USPPA reports ---
-# These are the real terms used by pilots in incident reports
-ACRO_KEYWORDS = [
-    # Specific acro maneuver names
-    r'\bsat\b',
-    r'\bwing\s*over', r'\bwingover',
-    r'\bbarrel\s*roll',
-    r'\bjoker\b',
-    r'\bspiral\s*dive',
-    r'\bloop(?:ing|s)?\b',
-    r'\brocket\s*loop',
-    r'\btumbl',
-    r'\bhelico',
-    r'\bmisty',
-    r'\bmctwist', r'\bmc\s*twist',
+# ============================================================================
+# ACRO DETECTION - based on actual USPPA report language
+# ============================================================================
+
+# TIER 1: Definitely acro - any single match = acro incident
+DEFINITE_ACRO = [
+    r'\bacro\b',                          # "doing acro", "acro at 50-200 feet"
+    r'\bacrobat',                         # "acrobatics", "low acrobatics", "low-altitude acrobatics"
+    r'\baerobat',                         # "aerobatics", "low aerobatics"
+    r'\bwing\s*overs?\b',                  # "wingovers", "wing overs", "wingover maneuver"
+    r'\bwingovers?\b',
+    r'\bbarrel\s*roll',                   # "barrel rolls"
+    r'\brocket\s*loop',                   # "triple rocket loop"
+    r'\bsat\s+maneuver',                  # "SAT maneuver" (avoids matching "sat down")
+    r'\bperforming\s+a\s+sat\b',         # "performing a SAT"
+    r'\bpractice\s+a\s+sat\b',           # "practice a SAT"
+    r'\btrick(?:s)?\s+and\s+stunt',      # "tricks and stunts"
+    r'\binvented\s+new\s+tricks',        # from entry 2883
+    r'\blow\s+(?:level\s+)?aerobat',     # "low aerobatics", "low level aerobatics"
+    r'\blow[\s-]+altitude\s+acrobat',    # "low-altitude acrobatics"
+    r'\blow\s+maneuvering',              # "low maneuvering" (entry 2487)
+    r'\baggressive\s+low\s+altitude\s+wingover',  # entry 1462
+    r'\blow\s+acro',                      # "low acro"
+    r'\btrike\s+acrobat',                # "trike acrobatics" (entry 2435)
+    r'\bshow\s*(?:ing)?\s*off',          # not yet seen but plausible
+    r'\bhot\s*dog',
+    r'\battempting\s+stalls',            # "attempting stalls" (entry 1409)
+    r'\bpre[\s-]?stall',                 # "pre stall" practice (entry 1409)
+    r'\bfull\s+stall\b(?!.*\bparachut)', # "full stall" but not "full stall parachute"
+    r'\binfinite\s*tumbl',
+    r'\bflat\s*spin',
+    r'\bmisty\s*flip',
+    r'\bmctwist',
     r'\besfera',
     r'\bcorkscrew',
-    r'\brhythmic',
-    r'\binfinite',
-    r'\bflat\s*spin',
-    r'\bfull\s*stall',
-    r'\bdeep\s*stall',
-    r'\bsuper\s*stall',
-    r'\basymmetric\s*spiral',
-    r'\bdynamic\s*(?:full\s*)?stall',
-    # Acro / aerobatics / trick terms
-    r'\bacro\b', r'\bacrobat',
-    r'\baerobat',
-    r'\btrick(?:s|ing)?\b',
-    r'\bstunt(?:s|ing)?\b',
-    # Aggressive / show-off flying
-    r'\blow\s+(?:maneuver|aerobat|pass|flyby|fly[\s-]*by)',
-    r'\blow\s+maneuvering',
-    r'\bshow\s*(?:ing)?\s*off',
-    r'\bhot\s*dog',
-    r'\bhotdog',
-    r'\bdisplay\s+(?:the\s+)?trick',
-    r'\bperform(?:ing|ed)?\s+(?:a\s+)?(?:trick|maneuver|stunt)',
-    # Smoke + maneuver context (airshow display)
-    r'\bsmoke\b.*\bwingover', r'\bwingover.*\bsmoke\b',
-    r'\bsmoke\b.*\blow\b', r'\blow\b.*\bsmoke\b.*\bmaneuver',
-    # Intentional stall/spin (not accidental)
-    r'\bstall(?:ing|ed)?\s+the\s+(?:glider|wing|canopy)',
-    r'\bintentional(?:ly)?\s+(?:stall|spin|spiral)',
-    r'\bpracticing\b.*\b(?:stall|spin|spiral|wingover|maneuver)',
-    r'\battempt(?:ing|ed)?\b.*\b(?:stall|spin|spiral|wingover|maneuver|trick|acro)',
-    # Reserve during maneuver
-    r'\breserve\b.*\b(?:maneuver|acro|trick|stunt|wingover|spiral|sat\b)',
-    r'\b(?:maneuver|acro|trick|stunt|wingover|spiral|sat)\b.*\breserve\b',
-    # Collapse during intentional maneuver
-    r'\bcollapse\b.*\b(?:wingover|maneuver|trick|acro)',
-    r'\b(?:wingover|maneuver|trick|acro).*\bcollapse\b',
+    r'\bdynamic\s+(?:full\s+)?stall',
 ]
 
-# --- Maneuver classification based on real USPPA terminology ---
+# TIER 2: Likely acro — intentional aggressive maneuver
+TIER2_PATTERNS = [
+    # Intentional spiral/steep turn that went wrong
+    r'\binitiat(?:ing|ed)\s+a\s+(?:steep|tight|deep)?\s*(?:spiral|turn)',
+    r'\bsteep\s+turn\b.*\b(?:spiral|aggressiv|water|crash)',
+    r'\bdeep\s+spiral\b',
+    r'\bspiral\s+dive\s+(?:loss|into|crash)',
+    r'\bdeath\s+spiral',
+    # Practicing spirals/stalls intentionally
+    r'\bpracticing\s+(?:death\s+)?spiral',
+    # Aggressive low flying
+    r'\blow[\s-]+level\s+maneuver',
+    r'\blow[\s-]+level\s+manouver',
+    r'\baggressiv(?:e|ely)\s+(?:turn|scalloped|wingover|low)',
+    r'\bact\s+of\s+showmanship',
+    r'\bbuzz(?:ing|ed)?\s+(?:the\s+)?(?:beach|field|crowd|people)',
+    r'\bgoofing\s+off',
+    r'\bfigure\s*8.*\b(?:low|aggressiv)',
+    r'\baggressiv.*\bfigure\s*8',
+    r'\broller\s*coaster\b.*\bmaneuver',
+    # Intentionally stalling at low altitude
+    r'\bstall(?:ing|ed)\s+the\s+(?:glider|wing)\s+(?:from|at)\s+\d+',
+    r'\bpilot\s+stalled\s+(?:the\s+)?wing\s+while',
+]
+
+# ============================================================================
+# MANEUVER CLASSIFICATION
+# ============================================================================
 MANEUVERS = {
-    'wing overs': [r'\bwing\s*over', r'\bwingover'],
+    'wing overs': [r'\bwing\s*overs?\b', r'\bwingovers?\b'],
     'barrel roll': [r'\bbarrel\s*roll'],
     'spiral': [r'\bspiral'],
-    'stall': [r'\bstall(?:ing|ed)?\b', r'\bfull\s*stall', r'\bdeep\s*stall'],
-    'spin': [r'\bspin\b', r'\bflat\s*spin'],
-    'infinite': [r'\binfinite', r'\btumbl'],
-    'SAT': [r'\bsat\b'],
-    'joker': [r'\bjoker\b'],
-    'helico': [r'\bhelico'],
-    'misty flip': [r'\bmisty'],
-    'looping': [r'\bloop', r'\brocket\s*loop'],
-    'single turn into ground': [r'\bsingle\s*turn', r'\bturn.*ground'],
+    'stall': [r'\bstall(?:ing|ed)?\b', r'\bfull\s*stall', r'\bpre[\s-]?stall'],
+    'spin': [r'\bspin\b(?!ning\s+propell)'],  # exclude "spinning propeller"
+    'infinite': [r'\binfinite', r'\btumbl(?!eweed)'],  # exclude "tumbleweed"
+    'SAT': [r'\bsat\s+maneuver', r'\bperforming\s+a\s+sat', r'\bpractice\s+a\s+sat'],
+    'looping': [r'\brocket\s*loop', r'\bloop(?!.*brake)'],  # exclude "brake loop"
+    'single turn into ground': [r'\bsingle\s*turn'],
 }
 
-# --- Low vs High acro detection based on real report language ---
-LOW_INDICATORS = [
-    r'\blow\s+(?:aerobat|maneuver|altitude|pass|fly)',
+# ============================================================================
+# LOW vs HIGH classification
+# ============================================================================
+LOW_PATTERNS = [
+    r'\blow\s+(?:level\s+)?aerobat',
+    r'\blow[\s-]+altitude\s+acrobat',
+    r'\blow\s+acro\b',
     r'\blow\s+maneuvering',
     r'\blow\b.*\bwingover', r'\bwingover.*\blow\b',
-    r'\btreetop', r'\btree\s*top',
-    r'\b(?:50|100|150|200)\s*(?:feet|foot|ft)\b',
-    r'\b\d+\s*(?:feet|foot|ft)\s*AGL\b',
+    r'\blow\b.*\bwing\s*over', r'\bwing\s*over.*\blow\b',
+    r'\b(?:30|40|50|75|100|120)\s*(?:feet|foot|ft|\')\s*(?:AGL)?\b',
+    r'\btreetop',
     r'\bnear\s*(?:the\s*)?ground',
-    r'\bclose\s*to\s*(?:the\s*)?ground',
     r'\btoo\s+low',
-    r'\binsufficient\s+alt',
-    r'\blow\b.*\bsmoke\b', r'\bsmoke\b.*\blow\b',
-    r'\blow\b.*\bcollapse', r'\bcollapse.*\blow\b',
+    r'\bless\s+than\s+50\s*ft',
+    r'\blow\s+pass',
+    r'\bbuzz(?:ing|ed)?.*(?:beach|ground|field)',
+    r'\blow\b.*\bsmoke\b',
+    r'\blow\s+alt',
+    r'\b50-200\s*f(?:ee)?t',                   # "50-200 ft" from entry 1955
+    r'\b35-50\s*ft',                            # from entry 1462
+    r'\bscalloped\s+wingovers',                 # always low (entry 1462)
+    r'low\s+acro(?:batics)?\s+kills',          # "Low acro kills" safety phrase
 ]
 
-HIGH_INDICATORS = [
+HIGH_PATTERNS = [
     r'\bhigh\s+(?:alt|altitude)\b',
-    r'\bover\s*water\b',
+    r'\bover\s+water\b.*\bacro',
     r'\b(?:1000|1500|2000|3000)\s*(?:feet|foot|ft)',
-    r'\bplenty\s+of\s+(?:alt|height)',
-    r'\bsafe\s+alt',
+    r'\bplenty\s+of\s+alt',
+    r'\bsafe\s+altitude',
+    r'\balt(?:itude)?\s+was\s+my\s+(?:biggest\s+)?ally',  # entry 2967
 ]
 
 ACRO_FORM_COLS = [
@@ -115,22 +131,43 @@ ACRO_FORM_COLS = [
 ]
 
 
-def get_all_text(rec):
-    """Combine all text fields for searching."""
-    fields = ['Raw_Text', 'Description', 'Type_of_Incident', 'Analysis',
-              'Phase_of_Flight', 'Collateral_Damage', 'Other']
-    return ' '.join(rec.get(f, '') or '' for f in fields)
+def get_text(rec):
+    return ' '.join(str(rec.get(k, '') or '') for k in [
+        'Raw_Text', 'Description', 'Type_of_Incident', 'Analysis',
+        'Phase_of_Flight', 'Collateral_Damage', 'Other'
+    ])
+
+
+def matches_any(text, patterns):
+    for p in patterns:
+        if re.search(p, text, re.IGNORECASE):
+            return True
+    return False
+
+
+def find_matches(text, patterns):
+    found = []
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE)
+        if m:
+            found.append(m.group(0).strip())
+    return found
 
 
 def is_acro_incident(rec):
-    """Check if incident matches any acro keyword."""
-    text = get_all_text(rec)
-    matched_terms = []
-    for pattern in ACRO_KEYWORDS:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            matched_terms.append(m.group(0))
-    return bool(matched_terms), matched_terms
+    text = get_text(rec)
+
+    # Tier 1: definite acro
+    matches = find_matches(text, DEFINITE_ACRO)
+    if matches:
+        return True, 'definite', matches
+
+    # Tier 2: specific aggressive/intentional maneuver patterns
+    tier2_matches = find_matches(text, TIER2_PATTERNS)
+    if tier2_matches:
+        return True, 'likely', tier2_matches
+
+    return False, None, []
 
 
 def detect_maneuver(text):
@@ -144,47 +181,61 @@ def detect_maneuver(text):
 
 
 def detect_low_or_high(text):
-    low = any(re.search(p, text, re.IGNORECASE) for p in LOW_INDICATORS)
-    high = any(re.search(p, text, re.IGNORECASE) for p in HIGH_INDICATORS)
+    low = matches_any(text, LOW_PATTERNS)
+    high = matches_any(text, HIGH_PATTERNS)
     if low and not high:
         return 'Low'
     if high and not low:
         return 'High'
     if low and high:
-        return 'Low'  # flag conservatively
+        return 'Low'
     return ''
 
 
 def detect_injury(rec):
-    text = (rec.get('Type_of_Injury', '') + ' ' + rec.get('Raw_Text', '')).lower()
-    if any(w in text for w in ['fatal', 'death', 'died', 'killed', 'deceased', 'perished']):
+    text = get_text(rec).lower()
+    typ = (rec.get('Type_of_Injury', '') or '').lower()
+    if 'fatal' in typ or any(w in text for w in ['fatal', 'death', 'died', 'killed', 'perished']):
         return 'Yes', 'Yes'
-    if any(w in text for w in ['no injury', 'none', 'no injuries', 'uninjured', 'walked away']):
+    if 'no injury' in typ or 'no injury' in text:
         return 'No', 'No'
-    if any(w in text for w in ['injury', 'injured', 'broken', 'broke', 'fracture', 'hospital',
-                                'concussion', 'laceration', 'sprain', 'burn', 'surgery']):
+    if 'major' in typ or any(w in text for w in ['broken', 'broke', 'fracture', 'hospital',
+                                                   'surgery', 'trauma center', 'airlifted']):
+        return 'Yes', 'No'
+    if 'minor' in typ:
         return 'Yes', 'No'
     return '', 'No'
 
 
 def detect_motor(rec):
-    text = get_all_text(rec).lower()
-    if any(w in text for w in ['paramotor', 'ppg', 'powered paraglid', 'motor', 'prop',
-                                'engine', 'throttle', 'frame']):
+    text = get_text(rec).lower()
+    ppg = (rec.get('PPG_Type', '') or '').lower()
+    frame = (rec.get('Paramotor_Frame', '') or '').lower()
+    if any(w in ppg + frame for w in ['paramotor', 'wheel launch', 'foot launch', 'trike']):
         return 'Motor'
-    if any(w in text for w in ['free flight', 'free fly', 'paraglid', ' pg ']):
+    if any(w in text for w in ['paramotor', 'ppg', 'motor', 'throttle', 'prop']):
+        return 'Motor'
+    if any(w in text for w in ['free flight', 'paraglider only']):
         return 'No Motor'
-    return 'Motor'  # USPPA default
+    return 'Motor'
 
 
-def convert_to_form(rec, matched_terms):
-    text = get_all_text(rec)
+def convert_to_form(rec):
+    text = get_text(rec)
     injury, fatal = detect_injury(rec)
 
     glider_parts = [rec.get('Wing_Brand', ''), rec.get('Wing_Model', '')]
     glider = ' '.join(p for p in glider_parts if p).strip()
 
-    desc = rec.get('Analysis', '') or rec.get('Description', '') or rec.get('Raw_Text', '')[:500]
+    desc = rec.get('Description', '') or ''
+    if not desc:
+        raw = rec.get('Raw_Text', '') or ''
+        # Skip the header boilerplate, grab meaningful content
+        for line in raw.split('\n'):
+            line = line.strip()
+            if len(line) > 50 and 'Incident List' not in line and 'Return to' not in line:
+                desc = line[:500]
+                break
 
     return {
         'Date': rec.get('Incident_Date', '') or rec.get('Incident_DateTime', ''),
@@ -204,7 +255,6 @@ def convert_to_form(rec, matched_terms):
 
 
 def main():
-    # Find the JSON file
     input_path = None
     for path in [INPUT_JSON_DATA, INPUT_JSON_ROOT]:
         if os.path.exists(path):
@@ -212,10 +262,7 @@ def main():
             break
 
     if not input_path:
-        print(f'No data found. Checked:')
-        print(f'  {INPUT_JSON_DATA}')
-        print(f'  {INPUT_JSON_ROOT}')
-        print('Run the scraper first: python server.py')
+        print('No data found. Run the scraper first.')
         return
 
     with open(input_path, 'r') as f:
@@ -225,28 +272,32 @@ def main():
 
     acro_records = []
     for rec in records:
-        is_acro, matched_terms = is_acro_incident(rec)
+        is_acro, confidence, matched = is_acro_incident(rec)
         if is_acro:
-            form_rec = convert_to_form(rec, matched_terms)
-            form_rec['_matched_terms'] = ', '.join(set(matched_terms))
-            form_rec['_entry_id'] = rec.get('Entry_ID', '')
+            form_rec = convert_to_form(rec)
+            entry_id = rec.get('Entry_ID', '?')
+            desc_short = (rec.get('Description', '') or '')[:60]
+            print(f'  [{confidence:8s}] Entry {entry_id}: {", ".join(set(matched))[:60]}')
+            print(f'             {desc_short}')
             acro_records.append(form_rec)
-            print(f'  MATCH Entry {rec.get("Entry_ID","?")}: {", ".join(set(matched_terms))}')
 
-    # Sort: low acro first, then by date
-    acro_records.sort(key=lambda r: (0 if r['Low_or_High'] == 'Low' else 1, r['Date']),
-                      reverse=True)
+    acro_records.sort(key=lambda r: (
+        0 if r['Low_or_High'] == 'Low' else (1 if r['Low_or_High'] == 'High' else 2),
+        r['Date']
+    ), reverse=True)
 
-    low_count = sum(1 for r in acro_records if r['Low_or_High'] == 'Low')
-    high_count = sum(1 for r in acro_records if r['Low_or_High'] == 'High')
-    unknown_count = len(acro_records) - low_count - high_count
+    low = sum(1 for r in acro_records if r['Low_or_High'] == 'Low')
+    high = sum(1 for r in acro_records if r['Low_or_High'] == 'High')
+    fatal = sum(1 for r in acro_records if r['Fatal'] == 'Yes')
 
-    print(f'\nFound {len(acro_records)} acro-related incidents:')
-    print(f'  Low acro:     {low_count}')
-    print(f'  High acro:    {high_count}')
-    print(f'  Unclassified: {unknown_count}')
+    print(f'\n{"="*50}')
+    print(f'RESULTS: {len(acro_records)} acro-related incidents')
+    print(f'  Low acro:     {low}')
+    print(f'  High acro:    {high}')
+    print(f'  Unclassified: {len(acro_records) - low - high}')
+    print(f'  Fatal:        {fatal}')
+    print(f'{"="*50}')
 
-    # Save CSV
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(OUTPUT_CSV, 'w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=ACRO_FORM_COLS, extrasaction='ignore')
