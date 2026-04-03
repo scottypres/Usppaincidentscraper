@@ -1,9 +1,9 @@
 {
   "phase": "scraping",
-  "done": 28,
+  "done": 33,
   "total": 542,
-  "message": "Scraped 28/542 incidents (5%)",
-  "timestamp": "2026-04-03T08:54:31Z",
+  "message": "Scraped 33/542 incidents (6%)",
+  "timestamp": "2026-04-03T08:54:33Z",
   "started_at": "2026-04-03T08:54:17Z",
-  "elapsed_seconds": 14
+  "elapsed_seconds": 16
 }
