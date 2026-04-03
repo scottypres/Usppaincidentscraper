@@ -138,11 +138,34 @@ def save_combined(records):
     return csv_path, json_path
 
 
+_start_time = None
+
+def save_status(phase, done=0, total=0, message=''):
+    """Write status.json so the website can show live progress."""
+    global _start_time
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    if _start_time is None:
+        _start_time = now
+    elapsed = int(time.time() - time.mktime(time.strptime(_start_time, '%Y-%m-%dT%H:%M:%SZ')))
+    status = {
+        'phase': phase,
+        'done': done,
+        'total': total,
+        'message': message,
+        'timestamp': now,
+        'started_at': _start_time,
+        'elapsed_seconds': elapsed,
+    }
+    with open(os.path.join(OUTPUT_DIR, 'status.json'), 'w') as f:
+        json.dump(status, f, indent=2)
+
+
 def save_manifest(batch_count):
     """Generate a manifest.json listing all downloadable files."""
     files = []
     for f in sorted(os.listdir(OUTPUT_DIR)):
-        if f == 'manifest.json':
+        if f in ('manifest.json', 'status.json'):
             continue
         filepath = os.path.join(OUTPUT_DIR, f)
         if os.path.isfile(filepath):
@@ -156,16 +179,38 @@ def save_manifest(batch_count):
         json.dump(manifest, mf, indent=2)
 
 
+def git_push_status():
+    """Commit and push status.json so the website updates mid-scrape."""
+    import subprocess
+    try:
+        subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True, capture_output=True)
+        subprocess.run(['git', 'config', 'user.email', 'github-actions[bot]@users.noreply.github.com'], check=True, capture_output=True)
+        subprocess.run(['git', 'add', '-f', os.path.join(OUTPUT_DIR, 'status.json')], check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'Update scraper status [automated]'], check=True, capture_output=True)
+        subprocess.run(['git', 'push'], check=True, capture_output=True)
+    except Exception:
+        pass  # Non-critical, don't break the scrape
+
+
 def main():
     print('=== USPPA Incident Scraper ===', file=sys.stderr)
+
+    save_status('listing', message='Discovering incident pages...')
+    git_push_status()
+
     entry_urls = get_entry_urls()
     total = len(entry_urls)
     print(f'\nFound {total} entries. Scraping with 10 threads…\n', file=sys.stderr)
+
+    save_status('scraping', done=0, total=total, message=f'Scraping {total} incidents...')
+    git_push_status()
 
     records = []
     all_records = []
     done = 0
     batch_num = 0
+    last_pct_pushed = -1
+    one_pct = max(1, total // 100)  # how many entries = 1%
 
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(parse_entry, url): url for url in entry_urls}
@@ -180,24 +225,35 @@ def main():
             sys.stderr.write(progress_bar(done, total))
             sys.stderr.flush()
 
+            # Push status every 1%
+            current_pct = (done * 100) // total if total else 0
+            if current_pct > last_pct_pushed:
+                last_pct_pushed = current_pct
+                save_status('scraping', done=done, total=total,
+                            message=f'Scraped {done}/{total} incidents ({current_pct}%)')
+                git_push_status()
+
             # Save batch every 100 incidents
             if len(records) >= 100:
                 batch_num += 1
                 fname = save_batch_csv(records, batch_num)
-                sys.stderr.write(f'\n  💾 Saved batch {batch_num}: {fname} ({len(records)} records)\n')
+                sys.stderr.write(f'\n  Saved batch {batch_num}: {fname} ({len(records)} records)\n')
                 records = []
 
     # Save remaining records as final batch
     if records:
         batch_num += 1
         fname = save_batch_csv(records, batch_num)
-        sys.stderr.write(f'\n  💾 Saved batch {batch_num}: {fname} ({len(records)} records)\n')
+        sys.stderr.write(f'\n  Saved batch {batch_num}: {fname} ({len(records)} records)\n')
 
     # Save combined files
     csv_path, json_path = save_combined(all_records)
 
     # Generate manifest for the static site
     save_manifest(batch_num)
+
+    save_status('complete', done=len(all_records), total=len(all_records),
+                message=f'Done! {len(all_records)} incidents in {batch_num} batches.')
 
     print(f'\n\nDone! Scraped {len(all_records)} records in {batch_num} batches.', file=sys.stderr)
     print(f'Combined CSV: {csv_path}', file=sys.stderr)

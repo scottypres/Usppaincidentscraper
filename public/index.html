@@ -13,6 +13,54 @@
   }
   h1 { font-size: 1.8rem; margin-bottom: 8px; }
   .subtitle { color: #666; margin-bottom: 28px; }
+
+  /* Progress card */
+  .status-card {
+    background: white; border-radius: 8px; padding: 20px 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 24px;
+    display: none;
+  }
+  .status-card.visible { display: block; }
+  .status-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+  }
+  .status-dot {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+  }
+  .status-dot.running { background: #f39c12; animation: pulse 1.5s infinite; }
+  .status-dot.complete { background: #27ae60; }
+  .status-dot.idle { background: #95a5a6; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .status-label { font-weight: 600; font-size: 0.95rem; }
+  .status-message { color: #666; font-size: 0.9rem; margin-bottom: 12px; }
+  .progress-track {
+    width: 100%; height: 24px; background: #e9ecef; border-radius: 12px;
+    overflow: hidden; position: relative;
+  }
+  .progress-fill {
+    height: 100%; border-radius: 12px; transition: width 0.5s ease;
+    background: linear-gradient(90deg, #3498db, #2ecc71);
+    position: relative;
+  }
+  .progress-fill.indeterminate {
+    width: 30% !important;
+    animation: shimmer 1.5s infinite;
+    background: linear-gradient(90deg, #3498db, #5dade2, #3498db);
+  }
+  @keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
+  .progress-text {
+    position: absolute; top: 0; left: 0; right: 0; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.8rem; font-weight: 600; color: #333; z-index: 1;
+  }
+  .status-time { color: #999; font-size: 0.8rem; margin-top: 8px; }
+  .timer-row {
+    display: flex; gap: 24px; margin-top: 10px; font-size: 0.85rem;
+  }
+  .timer-item { display: flex; align-items: center; gap: 6px; color: #555; }
+  .timer-label { color: #999; }
+
+  /* File tables */
   .section-label {
     font-weight: 600; font-size: 0.85rem; text-transform: uppercase;
     letter-spacing: 0.05em; color: #888; margin: 24px 0 10px;
@@ -20,8 +68,7 @@
   table {
     width: 100%; border-collapse: collapse; background: white;
     border-radius: 8px; overflow: hidden;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 16px;
   }
   th {
     background: #2c3e50; color: white; padding: 12px 16px;
@@ -51,19 +98,135 @@
 <h1>USPPA Incident Data</h1>
 <p class="subtitle">Download individual batch files (100 incidents each) or the full combined dataset.</p>
 
-<div id="content"><div class="empty">Loading...</div></div>
+<div id="status-card" class="status-card">
+  <div class="status-header">
+    <div id="status-dot" class="status-dot idle"></div>
+    <span id="status-label" class="status-label">Checking status...</span>
+  </div>
+  <div id="status-message" class="status-message"></div>
+  <div class="progress-track">
+    <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+    <div id="progress-text" class="progress-text"></div>
+  </div>
+  <div class="timer-row">
+    <div class="timer-item"><span class="timer-label">Elapsed:</span> <span id="timer-elapsed">--:--</span></div>
+    <div class="timer-item"><span class="timer-label">ETA:</span> <span id="timer-eta">--:--</span></div>
+  </div>
+  <div id="status-time" class="status-time"></div>
+</div>
+
+<div id="content"><div class="empty">Loading file list...</div></div>
 
 <script>
+const REPO = 'scottypres/Usppaincidentscraper';
+
 function formatSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / 1048576).toFixed(1) + ' MB';
 }
 
+function timeAgo(dateStr) {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  const days = Math.floor(hrs / 24);
+  return days + 'd ago';
+}
+
+let currentStatus = null;
+let timerInterval = null;
+
+function fmtDuration(secs) {
+  if (secs < 0 || !isFinite(secs)) return '--:--';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = Math.floor(secs % 60);
+  if (h > 0) return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  return m + ':' + String(s).padStart(2, '0');
+}
+
+function tickTimer() {
+  if (!currentStatus || !currentStatus.started_at) return;
+  const elapsedEl = document.getElementById('timer-elapsed');
+  const etaEl = document.getElementById('timer-eta');
+
+  if (currentStatus.phase === 'complete') {
+    elapsedEl.textContent = fmtDuration(currentStatus.elapsed_seconds);
+    etaEl.textContent = 'Done';
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    return;
+  }
+
+  const started = new Date(currentStatus.started_at).getTime();
+  const elapsed = (Date.now() - started) / 1000;
+  elapsedEl.textContent = fmtDuration(elapsed);
+
+  if (currentStatus.done > 0 && currentStatus.total > 0) {
+    const rate = currentStatus.done / currentStatus.elapsed_seconds;
+    const remaining = (currentStatus.total - currentStatus.done) / rate;
+    // Adjust for time since last status update
+    const sinceUpdate = (Date.now() - new Date(currentStatus.timestamp).getTime()) / 1000;
+    const adjustedRemaining = Math.max(0, remaining - sinceUpdate);
+    etaEl.textContent = fmtDuration(adjustedRemaining) + ' left';
+  } else {
+    etaEl.textContent = 'Calculating...';
+  }
+}
+
+function updateStatus(status) {
+  currentStatus = status;
+  const card = document.getElementById('status-card');
+  const dot = document.getElementById('status-dot');
+  const label = document.getElementById('status-label');
+  const msg = document.getElementById('status-message');
+  const fill = document.getElementById('progress-fill');
+  const text = document.getElementById('progress-text');
+  const timeEl = document.getElementById('status-time');
+
+  card.classList.add('visible');
+
+  if (status.phase === 'complete') {
+    dot.className = 'status-dot complete';
+    label.textContent = 'Scrape Complete';
+    msg.textContent = status.message;
+    fill.className = 'progress-fill';
+    fill.style.width = '100%';
+    text.textContent = status.done + ' incidents';
+    timeEl.textContent = 'Completed: ' + timeAgo(status.timestamp);
+  } else if (status.phase === 'listing') {
+    dot.className = 'status-dot running';
+    label.textContent = 'Scraping In Progress';
+    msg.textContent = status.message;
+    fill.className = 'progress-fill indeterminate';
+    fill.style.width = '30%';
+    text.textContent = 'Discovering pages...';
+    timeEl.textContent = 'Started: ' + timeAgo(status.started_at || status.timestamp);
+  } else if (status.phase === 'scraping') {
+    dot.className = 'status-dot running';
+    label.textContent = 'Scraping In Progress';
+    msg.textContent = status.message;
+    fill.className = 'progress-fill';
+    const pct = status.total > 0 ? Math.round((status.done / status.total) * 100) : 0;
+    fill.style.width = pct + '%';
+    text.textContent = status.done + ' / ' + status.total + ' (' + pct + '%)';
+    timeEl.textContent = 'Updated: ' + timeAgo(status.timestamp);
+  }
+
+  // Start ticking timer
+  tickTimer();
+  if (!timerInterval && status.phase !== 'complete') {
+    timerInterval = setInterval(tickTimer, 1000);
+  }
+}
+
 function renderFiles(manifest) {
   const el = document.getElementById('content');
   if (!manifest.files || manifest.files.length === 0) {
-    el.innerHTML = '<div class="empty">No files yet. Run <code>python scraper.py</code> first, then redeploy.</div>';
+    el.innerHTML = '<div class="empty">No data files yet. Trigger the scraper from the GitHub Actions tab to get started.</div>';
     return;
   }
 
@@ -74,15 +237,15 @@ function renderFiles(manifest) {
   if (combined.length) {
     html += '<div class="section-label">Combined (All Incidents)</div><table><tr><th>File</th><th>Size</th><th></th></tr>';
     combined.forEach(f => {
-      html += `<tr><td>${f.name}</td><td class="size">${formatSize(f.size)}</td><td><a href="data/${f.name}" download class="btn btn-combined">Download</a></td></tr>`;
+      html += '<tr><td>' + f.name + '</td><td class="size">' + formatSize(f.size) + '</td><td><a href="data/' + f.name + '" download class="btn btn-combined">Download</a></td></tr>';
     });
     html += '</table>';
   }
 
   if (batches.length) {
-    html += `<div class="section-label">Batches (${batches.length} files, ~100 incidents each)</div><table><tr><th>File</th><th>Size</th><th></th></tr>`;
+    html += '<div class="section-label">Batches (' + batches.length + ' files, ~100 incidents each)</div><table><tr><th>File</th><th>Size</th><th></th></tr>';
     batches.forEach(f => {
-      html += `<tr><td>${f.name}</td><td class="size">${formatSize(f.size)}</td><td><a href="data/${f.name}" download class="btn btn-batch">Download</a></td></tr>`;
+      html += '<tr><td>' + f.name + '</td><td class="size">' + formatSize(f.size) + '</td><td><a href="data/' + f.name + '" download class="btn btn-batch">Download</a></td></tr>';
     });
     html += '</table>';
   }
@@ -90,13 +253,36 @@ function renderFiles(manifest) {
   el.innerHTML = html;
 }
 
-fetch('data/manifest.json')
+// Poll status.json for live progress
+let statusInterval;
+function pollStatus() {
+  fetch('data/status.json?t=' + Date.now())
+    .then(r => r.json())
+    .then(status => {
+      updateStatus(status);
+      // Stop polling if complete
+      if (status.phase === 'complete' && statusInterval) {
+        clearInterval(statusInterval);
+        statusInterval = null;
+      }
+    })
+    .catch(() => {
+      // No status file yet, hide the card
+    });
+}
+
+// Load files
+fetch('data/manifest.json?t=' + Date.now())
   .then(r => r.json())
   .then(renderFiles)
   .catch(() => {
     document.getElementById('content').innerHTML =
-      '<div class="empty">No data files found. Run <code>python scraper.py</code> to generate data, then deploy.</div>';
+      '<div class="empty">No data files found. Trigger the scraper from the GitHub Actions tab to get started.</div>';
   });
+
+// Start polling status
+pollStatus();
+statusInterval = setInterval(pollStatus, 10000); // every 10s
 </script>
 </body>
 </html>
