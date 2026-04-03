@@ -1,17 +1,65 @@
 import requests
 from bs4 import BeautifulSoup
-import re, csv, json, sys, time, os
+import re, csv, json, sys, time, os, subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 BASE = 'https://usppa.org'
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public', 'data')
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(ROOT_DIR, 'public', 'data')
 
-COLS = ['Entry_ID','Incident_Date','Incident_DateTime','Location','PPG_Type','Type_of_Incident',
-        'Description','Type_of_Injury','Phase_of_Flight','Flight_Window','Wind_Speed',
-        'Age','Weight','Gender','Highest_Rating','Pilot_Experience',
-        'Wing_Brand','Wing_Model','Wing_Size','Paramotor_Frame',
-        'Collateral_Damage','Analysis','Video_URL','URL']
+# Known field labels mapped to clean column names
+FIELD_MAP = {
+    'ppg type': 'PPG_Type',
+    'type of injury': 'Type_of_Injury',
+    'age': 'Age',
+    'weight': 'Weight',
+    'gender': 'Gender',
+    'highest rating held': 'Highest_Rating',
+    'highest rating': 'Highest_Rating',
+    'pilot experience level': 'Pilot_Experience',
+    'pilot experience': 'Pilot_Experience',
+    'experience level': 'Pilot_Experience',
+    'wing brand': 'Wing_Brand',
+    'wing make': 'Wing_Brand',
+    'model': 'Wing_Model',
+    'wing model': 'Wing_Model',
+    'size': 'Wing_Size',
+    'wing size': 'Wing_Size',
+    'paramotor frame': 'Paramotor_Frame',
+    'paramotor': 'Paramotor_Frame',
+    'frame': 'Paramotor_Frame',
+    'motor': 'Paramotor_Frame',
+    'location of the incident': 'Location',
+    'location': 'Location',
+    'incident location': 'Location',
+    'type of incident': 'Type_of_Incident',
+    'incident type': 'Type_of_Incident',
+    'flight window': 'Flight_Window',
+    'wind speed': 'Wind_Speed',
+    'wind': 'Wind_Speed',
+    'phase of flight': 'Phase_of_Flight',
+    'flight phase': 'Phase_of_Flight',
+    'collateral damage': 'Collateral_Damage',
+    'analysis of the incident': 'Analysis',
+    'analysis': 'Analysis',
+    'incident analysis': 'Analysis',
+    'description': 'Description',
+    'incident description': 'Description',
+    'narrative': 'Description',
+    'video': 'Video_URL',
+    'video url': 'Video_URL',
+    'photos': 'Photos_URL',
+    'photo': 'Photos_URL',
+    'other': 'Other',
+}
+
+COLS = ['Entry_ID', 'Incident_Date', 'Incident_DateTime', 'Location', 'PPG_Type',
+        'Type_of_Incident', 'Description', 'Type_of_Injury', 'Phase_of_Flight',
+        'Flight_Window', 'Wind_Speed', 'Age', 'Weight', 'Gender',
+        'Highest_Rating', 'Pilot_Experience', 'Wing_Brand', 'Wing_Model',
+        'Wing_Size', 'Paramotor_Frame', 'Collateral_Damage', 'Analysis',
+        'Video_URL', 'Photos_URL', 'Other', 'Raw_Text', 'URL']
 
 
 def fetch(url):
@@ -21,8 +69,8 @@ def fetch(url):
 
 def get_entry_urls():
     urls = []
-    for page in range(1, 30):
-        print(f'Listing page {page}…', file=sys.stderr)
+    for page in range(1, 100):
+        print(f'Listing page {page}...', file=sys.stderr)
         html = fetch(f'{BASE}/incidents/?frm-page-7672={page}')
         soup = BeautifulSoup(html, 'html.parser')
         links = soup.select('a[href*="/incidents/entry/"]')
@@ -42,60 +90,76 @@ def parse_entry(url):
     try:
         html = fetch(url)
     except Exception as e:
-        return {'URL': url, 'Entry_ID': url.split('/entry/')[-1].rstrip('/'), 'Error': str(e)}
+        return {'URL': url, 'Entry_ID': url.split('/entry/')[-1].rstrip('/'),
+                'Raw_Text': '', 'Error': str(e)}
 
     soup = BeautifulSoup(html, 'html.parser')
-    content = soup.select_one('.zn_text_box')
+
+    # Try multiple content selectors
+    content = None
+    for sel in ['.zn_text_box', '.entry-content', '.post-content', 'article', 'main']:
+        content = soup.select_one(sel)
+        if content:
+            break
+
     if not content:
-        return {'URL': url, 'Entry_ID': url.split('/entry/')[-1].rstrip('/'), 'Error': 'No content'}
+        return {'URL': url, 'Entry_ID': url.split('/entry/')[-1].rstrip('/'),
+                'Raw_Text': '', 'Error': 'No content'}
 
     text = content.get_text(separator='\n', strip=True)
-    rec = {'URL': url, 'Entry_ID': url.split('/entry/')[-1].rstrip('/')}
+    rec = {col: '' for col in COLS}
+    rec['URL'] = url
+    rec['Entry_ID'] = url.split('/entry/')[-1].rstrip('/')
+    rec['Raw_Text'] = text
 
-    patterns = [
-        ('PPG_Type', r'PPG Type\s*:\s*(.+?)(?=\n|Type of Injury|$)'),
-        ('Type_of_Injury', r'Type of Injury\s*:\s*(.+?)(?=\n|Age|$)'),
-        ('Age', r'Age\s*:\s*(\d+)'),
-        ('Weight', r'Weight\s*:\s*(\d+)'),
-        ('Gender', r'Gender\s*:\s*(\w+)'),
-        ('Highest_Rating', r'Highest rating held.*?:\s*(.+?)(?=\n|Pilot experience|$)'),
-        ('Pilot_Experience', r'Pilot experience level\s*:\s*(.+?)(?=\n|Wing Brand|$)'),
-        ('Wing_Brand', r'Wing Brand\s*:\s*(.+?)(?=\n|Model|$)'),
-        ('Wing_Model', r'(?<!\w)Model\s*:\s*(.+?)(?=\n|Size|$)'),
-        ('Wing_Size', r'Size\s*:\s*(.+?)(?=\n|Paramotor|$)'),
-        ('Paramotor_Frame', r'Paramotor Frame\s*:\s*(.+?)(?=\n|$)'),
-        ('Incident_DateTime', r'(\w+ \d{1,2}, \d{4}\s+\d{1,2}:\d{2}\s*[APM]{2})'),
-        ('Incident_Date', r'(\w+ \d{1,2}, \d{4})'),
-        ('Location', r'Location of the incident:\s*(.+?)(?=\n|Type of Incident|$)'),
-        ('Type_of_Incident', r'Type of Incident\s*:\s*(.+?)(?=\n|$)'),
-        ('Flight_Window', r'Flight Window\s*:\s*(.+?)(?=\n|Wind Speed|$)'),
-        ('Wind_Speed', r'Wind Speed\s*:\s*(.+?)(?=\n|Type|$)'),
-        ('Phase_of_Flight', r'Phase of Flight\s*:\s*(.+?)(?=\n|Type of Injury|Collateral|$)'),
-        ('Collateral_Damage', r'Collateral Damage\s*:\s*(.+?)(?=\n|Analysis|$)'),
-        ('Analysis', r'Analysis of the incident.*?:\s*(.+?)(?=\n|Photos|Video|Other|$)'),
-    ]
+    # Extract date/time
+    dt_match = re.search(r'(\w+ \d{1,2},?\s*\d{4}\s+\d{1,2}:\d{2}\s*[APMapm]{2})', text)
+    if dt_match:
+        rec['Incident_DateTime'] = dt_match.group(1).strip()
+    d_match = re.search(r'(\w+ \d{1,2},?\s*\d{4})', text)
+    if d_match:
+        rec['Incident_Date'] = d_match.group(1).strip()
 
-    for name, pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
+    # Generic key:value extraction — handles any "Label : Value" format
+    # Split text into lines and look for "label : value" patterns
+    lines = text.split('\n')
+    for i, line in enumerate(lines):
+        # Match "Some Label : some value" or "Some Label: some value"
+        m = re.match(r'^(.+?)\s*:\s*(.+)$', line.strip())
         if m:
-            val = next((g for g in m.groups() if g is not None), '')
-            rec[name] = val.strip()
-        else:
-            rec[name] = ''
+            label = m.group(1).strip().rstrip('.')
+            value = m.group(2).strip()
+            # Look up the label in our field map (case-insensitive)
+            label_lower = label.lower()
+            for known_label, col_name in FIELD_MAP.items():
+                if known_label in label_lower or label_lower in known_label:
+                    if not rec[col_name]:  # don't overwrite if already found
+                        rec[col_name] = value
+                    break
 
-    # Description
-    bolds = content.select('strong')
-    for b in bolds:
-        t = b.get_text(strip=True)
-        if len(t) > 30 and not any(k in t for k in ['PPG Type', 'Type of Injury', 'Age', 'Weight', 'Gender', 'Wing Brand', 'Flight Window', 'Wind Speed', 'Phase of Flight', 'Collateral', 'Analysis', 'Highest rating', 'Pilot experience', 'Location of']):
-            rec['Description'] = t
-            break
-    if 'Description' not in rec:
-        rec['Description'] = ''
+    # Also try multi-line: label on one line, value on next
+    for i, line in enumerate(lines):
+        label_lower = line.strip().rstrip(':').lower()
+        for known_label, col_name in FIELD_MAP.items():
+            if label_lower == known_label and i + 1 < len(lines):
+                value = lines[i + 1].strip()
+                if value and not rec[col_name]:
+                    rec[col_name] = value
+                break
 
-    # Video
-    vm = re.search(r'Video.*?:\s*(https?://\S+)', text)
-    rec['Video_URL'] = vm.group(1) if vm else ''
+    # Description from bold text if not already found
+    if not rec['Description']:
+        for b in content.select('strong, b'):
+            t = b.get_text(strip=True)
+            if len(t) > 30:
+                label_like = False
+                for known in FIELD_MAP:
+                    if known in t.lower():
+                        label_like = True
+                        break
+                if not label_like:
+                    rec['Description'] = t
+                    break
 
     return rec
 
@@ -138,13 +202,9 @@ def save_combined(records):
 def save_status(phase, done=0, total=0, message='', elapsed_seconds=0, started_at=''):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     status = {
-        'phase': phase,
-        'done': done,
-        'total': total,
-        'message': message,
+        'phase': phase, 'done': done, 'total': total, 'message': message,
         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-        'started_at': started_at,
-        'elapsed_seconds': elapsed_seconds,
+        'started_at': started_at, 'elapsed_seconds': elapsed_seconds,
     }
     with open(os.path.join(OUTPUT_DIR, 'status.json'), 'w') as f:
         json.dump(status, f, indent=2)
@@ -165,6 +225,26 @@ def save_manifest(batch_count):
     manifest = {'files': files, 'batch_count': batch_count}
     with open(os.path.join(OUTPUT_DIR, 'manifest.json'), 'w') as mf:
         json.dump(manifest, mf, indent=2)
+
+
+def git_push_data():
+    """Commit and push all data files to the repo when scrape is complete."""
+    print('\nPushing data to repo...', file=sys.stderr)
+    try:
+        subprocess.run(['git', 'config', 'user.name', 'usppa-scraper'], capture_output=True, cwd=ROOT_DIR)
+        subprocess.run(['git', 'config', 'user.email', 'scraper@localhost'], capture_output=True, cwd=ROOT_DIR)
+        subprocess.run(['git', 'add', '-f', 'public/data/'], check=True, capture_output=True, cwd=ROOT_DIR)
+        result = subprocess.run(['git', 'diff', '--staged', '--quiet'], capture_output=True, cwd=ROOT_DIR)
+        if result.returncode != 0:
+            subprocess.run(['git', 'commit', '-m', 'Update incident data [automated]'],
+                           check=True, capture_output=True, cwd=ROOT_DIR)
+            subprocess.run(['git', 'push'], check=True, capture_output=True, cwd=ROOT_DIR)
+            print('Data pushed to repo successfully.', file=sys.stderr)
+        else:
+            print('No changes to push.', file=sys.stderr)
+    except Exception as e:
+        print(f'Git push failed: {e}', file=sys.stderr)
+        print('Data is still saved locally in public/data/', file=sys.stderr)
 
 
 def run_scrape():
@@ -195,18 +275,15 @@ def run_scrape():
                 records.append(rec)
                 all_records.append(rec)
 
-            # Terminal progress bar
             sys.stderr.write(progress_bar(done, total))
             sys.stderr.flush()
 
-            # Update status.json every entry (instant local reads)
             elapsed = int(time.time() - start)
             pct = (done * 100) // total if total else 0
             save_status('scraping', done=done, total=total,
                         message=f'Scraped {done}/{total} incidents ({pct}%)',
                         elapsed_seconds=elapsed, started_at=started_at)
 
-            # Save batch CSV every 100
             if len(records) >= 100:
                 batch_num += 1
                 fname = save_batch_csv(records, batch_num)
@@ -214,12 +291,10 @@ def run_scrape():
                 sys.stderr.write(f'\n  Saved batch {batch_num}: {fname}\n')
                 records = []
 
-    # Final batch
     if records:
         batch_num += 1
         save_batch_csv(records, batch_num)
 
-    # Combined files
     save_combined(all_records)
     save_manifest(batch_num)
 
@@ -229,6 +304,9 @@ def run_scrape():
                 elapsed_seconds=elapsed, started_at=started_at)
 
     print(f'\n\nDone! {len(all_records)} records in {batch_num} batches. ({elapsed}s)', file=sys.stderr)
+
+    # Auto-push to repo
+    git_push_data()
 
 
 if __name__ == '__main__':
